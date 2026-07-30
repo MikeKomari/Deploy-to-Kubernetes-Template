@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${APP_NAME}
+  namespace: ${NAMESPACE}
+  labels:
+    app: ${APP_NAME}
+    env: ${ENVIRONMENT}
+spec:
+  replicas: ${REPLICAS}
+  selector:
+    matchLabels:
+      app: ${APP_NAME}
+  template:
+    metadata:
+      labels:
+        app: ${APP_NAME}
+        env: ${ENVIRONMENT}
+    spec:
+      containers:
+        - name: ${APP_NAME}
+          image: ${IMAGE}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: ${APP_PORT}
+              protocol: TCP
+          env:
+            - name: APP_PORT
+              value: "${APP_PORT}"
+            - name: APP_ENV
+              value: "${ENVIRONMENT}"
+          envFrom:
+            - configMapRef:
+                name: ${APP_NAME}-config
+          resources:
+            requests:
+              memory: "${MEMORY_REQUEST}"
+              cpu: "${CPU_REQUEST}"
+            limits:
+              memory: "${MEMORY_LIMIT}"
+              cpu: "${CPU_LIMIT}"
+          livenessProbe:
+            httpGet:
+              path: ${HEALTHCHECK_PATH}
+              port: ${APP_PORT}
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: ${HEALTHCHECK_PATH}
+              port: ${APP_PORT}
+            initialDelaySeconds: 5
+            periodSeconds: 15
