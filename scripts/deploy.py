@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
-"""Deploy Kubernetes manifests from the k8s/ directory.
+"""Interactive Kubernetes deployer.
 
-Cross-platform replacement for deploy.sh. Uses kubectl via subprocess.
-Environment variables (APP_NAME, NAMESPACE, ...) control the rendered
-manifests; `${VAR}` / `${VAR:-default}` placeholders are substituted.
+Asks for each setting (namespace, environment, image, replicas, ...) and
+uses a default value when you press Enter with no input.
+
+Non-interactive mode (used automatically in CI, or with --yes) skips all
+prompts and uses environment variables or the built-in defaults.
+
+Usage:
+    python3 scripts/deploy.py             # interactive prompts
+    python3 scripts/deploy.py --preview   # show rendered manifests, don't apply
+    python3 scripts/deploy.py --yes       # no prompts, use defaults/env vars
 """
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -31,6 +39,40 @@ DEFAULTS = {
     "CPU_LIMIT": "500m",
 }
 
+def _is_positive_int(value: str) -> bool:
+    """a positive integer"""
+    return value.isdigit() and int(value) > 0
+
+
+def _is_port(value: str) -> bool:
+    """a port number (1-65535)"""
+    return value.isdigit() and 1 <= int(value) <= 65535
+
+
+def _is_service_type(value: str) -> bool:
+    """ClusterIP, NodePort or LoadBalancer"""
+    return value in {"ClusterIP", "NodePort", "LoadBalancer"}
+
+
+PROMPTS = [
+    ("APP_NAME", "App name"),
+    ("NAMESPACE", "Namespace", "app name"),
+    ("ENVIRONMENT", "Environment"),
+    ("IMAGE", "Image", "app name:latest"),
+    ("REPLICAS", "Replicas", None, _is_positive_int),
+    ("APP_PORT", "App port (container)", None, _is_port),
+    ("SERVICE_PORT", "Service port", None, _is_port),
+    ("SERVICE_TYPE", "Service type", None, _is_service_type),
+    ("INGRESS_HOST", "Ingress host", "app name.example.com"),
+    ("INGRESS_CLASS", "Ingress class"),
+    ("INGRESS_PATH", "Ingress path"),
+    ("HEALTHCHECK_PATH", "Healthcheck path"),
+    ("MEMORY_REQUEST", "Memory request"),
+    ("CPU_REQUEST", "CPU request"),
+    ("MEMORY_LIMIT", "Memory limit"),
+    ("CPU_LIMIT", "CPU limit"),
+]
+
 
 def envsubst(text: str) -> str:
     """Expand ${VAR}, $VAR and ${VAR:-default} using os.environ."""
@@ -45,55 +87,130 @@ def envsubst(text: str) -> str:
     return pattern.sub(repl, text)
 
 
-def run(cmd: list[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, capture_output=True, text=True)
+def default_for(key: str, app_name: str) -> str:
+    """Prefer an env var, then a sensible default."""
+    env_value = os.environ.get(key)
+    if env_value:
+        return env_value
+    if key == "APP_NAME":
+        return DEFAULTS["APP_NAME"]
+    if key == "NAMESPACE":
+        return app_name
+    if key == "INGRESS_HOST":
+        return f"{app_name}.example.com"
+    if key == "IMAGE":
+        ci_image = os.environ.get("CI_REGISTRY_IMAGE", "")
+        ci_sha = os.environ.get("CI_COMMIT_SHORT_SHA", "")
+        if ci_image and ci_sha:
+            return f"{ci_image}:{ci_sha}"
+        return f"{app_name}:latest"
+    return DEFAULTS[key]
 
 
-def main() -> int:
-    for key, value in DEFAULTS.items():
-        os.environ.setdefault(key, value)
+def ask(label: str, default: str, validate=None) -> str:
+    while True:
+        raw = input(f"  {label} [{default}]: ").strip()
+        value = raw or default
+        if validate is None or validate(value):
+            return value
+        print(f"    Invalid: expected {validate.__doc__}.")
 
-    app_name = os.environ.get("APP_NAME", "myapp")
-    os.environ.setdefault("NAMESPACE", app_name)
 
-    ci_image = os.environ.get("CI_REGISTRY_IMAGE", "")
-    ci_sha = os.environ.get("CI_COMMIT_SHORT_SHA", "")
-    os.environ.setdefault("IMAGE", f"{ci_image}:{ci_sha}")
+def gather_settings(interactive: bool) -> dict:
+    app_name = default_for("APP_NAME", "")
+    print("==> Kubernetes deployment settings (Enter = default)")
+    if not interactive:
+        print("    Non-interactive mode: using defaults / environment variables")
+    settings = {}
+    for item in PROMPTS:
+        key, label = item[0], item[1]
+        validate = item[3] if len(item) > 3 else None
+        default = default_for(key, app_name)
+        if interactive:
+            settings[key] = ask(label, default, validate)
+        else:
+            settings[key] = default
+        if key == "APP_NAME":
+            app_name = settings[key]
+    return settings
 
-    ingress_host = os.environ.get("INGRESS_HOST") or f"{app_name}.example.com"
-    os.environ["INGRESS_HOST"] = ingress_host
 
-    namespace = os.environ["NAMESPACE"]
-    environment = os.environ["ENVIRONMENT"]
-    image = os.environ["IMAGE"]
-
-    print(f"==> Deploying {app_name} to namespace {namespace} ({environment})")
-    print(f"    Image: {image}")
-
-    result = run(["kubectl", "get", "namespace", namespace])
-    if result.returncode != 0:
-        print(run(["kubectl", "create", "namespace", namespace]).stdout, end="")
-
+def render_manifests() -> list[tuple[str, str]]:
     manifest_dir = REPO_ROOT / "k8s"
     if not manifest_dir.is_dir():
         print(f"ERROR: {manifest_dir} not found.", file=sys.stderr)
-        return 1
+        sys.exit(1)
+    return [(m.name, envsubst(m.read_text()))
+            for m in sorted(manifest_dir.glob("*.yaml"))
+            if m.name not in ("namespace.yaml", "kustomization.yaml")]
 
-    for manifest in sorted(manifest_dir.glob("*.yaml")):
-        if manifest.name == "namespace.yaml" or manifest.name == "kustomization.yaml":
-            continue
-        print(f"  Applying {manifest.name}")
-        rendered = envsubst(manifest.read_text())
+
+def apply_manifests(settings: dict, manifests: list[tuple[str, str]]) -> None:
+    namespace = settings["NAMESPACE"]
+    if run(["kubectl", "get", "namespace", namespace]).returncode != 0:
+        run(["kubectl", "create", "namespace", namespace])
+    for name, rendered in manifests:
+        print(f"  Applying {name}")
         result = subprocess.run(["kubectl", "apply", "-f", "-"], input=rendered,
                                 capture_output=True, text=True)
         sys.stdout.write(result.stdout)
         sys.stderr.write(result.stderr)
         if result.returncode != 0:
-            return result.returncode
+            sys.exit(result.returncode)
 
-    print(f"==> Done! Run: kubectl get all -n {namespace}")
+
+def run(cmd: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, capture_output=True, text=True)
+
+
+def main() -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Deploy k8s/ manifests to Kubernetes")
+    parser.add_argument("--preview", action="store_true",
+                        help="print rendered manifests without applying")
+    parser.add_argument("--yes", action="store_true",
+                        help="skip prompts, use defaults/environment")
+    args = parser.parse_args()
+
+    interactive = not (args.yes or os.environ.get("CI") or not sys.stdin.isatty())
+
+    if shutil.which("kubectl") is None:
+        print("ERROR: 'kubectl' not found on PATH.", file=sys.stderr)
+        return 1
+
+    settings = gather_settings(interactive)
+
+    os.environ.update(settings)
+    manifests = render_manifests()
+
+    print("==> Deployment summary")
+    for key, label in ((p[0], p[1]) for p in PROMPTS):
+        print(f"    {label}: {settings[key]}")
+    print(f"    Manifests: {len(manifests)} file(s)")
+
+    if args.preview:
+        for name, rendered in manifests:
+            print(f"--- {name} ---")
+            print(rendered, end="")
+        print("==> Preview only, nothing applied.")
+        return 0
+
+    if interactive:
+        confirm = input("Apply to cluster? [Y/n]: ").strip().lower()
+        if confirm not in ("", "y", "yes"):
+            print("Aborted.")
+            return 1
+
+    print(f"==> Deploying to namespace {settings['NAMESPACE']} ({settings['ENVIRONMENT']})")
+    apply_manifests(settings, manifests)
+    print(f"==> Done! Run: kubectl get all -n {settings['NAMESPACE']}")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print("\nAborted.")
+        sys.exit(130)
