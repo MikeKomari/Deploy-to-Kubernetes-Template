@@ -35,7 +35,7 @@ preview: ## Print rendered YAML (dry-run)
 	done
 
 deploy: ## Deploy to Kubernetes
-	@bash scripts/deploy.sh
+	@python3 scripts/deploy.py
 
 undeploy: ## Delete the entire namespace (tears down everything)
 	@kubectl delete namespace $(NAMESPACE) --ignore-not-found
@@ -71,7 +71,7 @@ envfile: ## Generate .env.example from defaults
 # === Docker Compose bridge ===
 
 compose: ## Generate K8s manifests from docker-compose.yml
-	@bash scripts/compose-to-k8s.sh
+	@python3 scripts/compose-to-k8s.py
 
 compose-preview: ## Run docker-compose config (validate your compose file)
 	@docker-compose config
@@ -79,6 +79,7 @@ compose-preview: ## Run docker-compose config (validate your compose file)
 # === Quick pod for testing ===
 
 pod: ## Run a standalone test pod (no service, no deployment)
+	@kubectl create namespace $(NAMESPACE) --dry-run=client -o yaml | kubectl apply -f -
 	APP_NAME=$(APP_NAME) IMAGE=$(IMAGE) NAMESPACE=$(NAMESPACE) \
 		envsubst < k8s/pod.yaml | kubectl apply -f -
 	@echo "Pod $(APP_NAME) created. Run 'make logs' to see output."

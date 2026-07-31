@@ -1,0 +1,57 @@
+x-common:
+  # logging configuration definition for all containers.
+  # This is important and should be applied to all containers to prevent ever-increasing container.
+  x-common-logging: &x-common-logging
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+      compress: "true"
+
+services:
+  metabase:
+    image: metabase/metabase:v0.55.10
+    container_name: metabase
+    hostname: metabase
+    volumes:
+      - /dev/urandom:/dev/random:ro
+    ports:
+      - ${METABASE_HTTP_PORT:-9030}:3000 # External port should be configurable, and all configuration should have default value
+    environment:
+      MB_DB_TYPE: postgres
+      MB_DB_DBNAME: metabaseappdb
+      MB_DB_PORT: 5432
+      MB_DB_USER: metabase
+      MB_DB_PASS: mysecretpassword
+      MB_DB_HOST: postgres
+      MB_PASSWORD_COMPLEXITY: weak
+    logging:
+      <<: *x-common-logging # Use global logging setting
+    networks:
+      - metanet1
+    healthcheck:
+      test: curl --fail -I http://localhost:3000/api/health || exit 1
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  postgres:
+    image: postgres:14
+    container_name: postgres
+    hostname: postgres
+    ports:
+      - ${METABASE_POSTGRE_PORT:-9031}:5432 # External port should be configurable, and all configuration should have default value
+    environment:
+      POSTGRES_USER: metabase
+      POSTGRES_DB: metabaseappdb
+      POSTGRES_PASSWORD: mysecretpassword
+    logging:
+      <<: *x-common-logging # Use global logging setting
+    volumes:
+      - ./docker-volume/postgres-data:/var/lib/postgresql/data
+    networks:
+      - metanet1
+
+networks:
+  metanet1:
+    driver: bridge
