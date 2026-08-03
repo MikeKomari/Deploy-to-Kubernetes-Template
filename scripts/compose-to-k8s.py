@@ -193,7 +193,7 @@ def main() -> int:
                 "labels": {"app": name, "env": "${ENVIRONMENT}"},
             },
             "spec": {
-                "replicas": "${REPLICAS:-1}",
+                "replicas": int(os.environ.get("REPLICAS") or 1),
                 "selector": {"matchLabels": {"app": name}},
                 "template": {
                     "metadata": {"labels": {"app": name, "env": "${ENVIRONMENT}"}},
