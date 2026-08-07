@@ -49,15 +49,15 @@ build:
   script:
     # Fail fast with helpful messages instead of cryptic docker errors
     - |
-      if [ ! -z "$NEXUS_URL" ]; then
+      if [ -z "$NEXUS_URL" ]; then
         echo "ERROR: NEXUS_URL is not set (GitLab CI/CD variable)"
         exit 1
       fi
-      if [ ! -z "$NEXUS_USERNAME" ]; then
+      if [ -z "$NEXUS_USERNAME" ]; then
         echo "ERROR: NEXUS_USERNAME is not set (GitLab CI/CD variable)"
         exit 1
       fi
-      if [ ! -z "$NEXUS_API_KEY" ]; then
+      if [ -z "$NEXUS_API_KEY" ]; then
         echo "ERROR: NEXUS_API_KEY is not set (GitLab CI/CD variable)"
         exit 1
       fi
