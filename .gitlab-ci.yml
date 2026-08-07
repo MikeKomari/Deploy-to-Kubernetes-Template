@@ -41,7 +41,7 @@ validate:
   only:
     - main
   tags:
-    - bankai
+    - docker-runner
 
 # -------- BUILD + PUBLISH TO NEXUS --------
 build:
@@ -73,7 +73,7 @@ build:
   only:
     - main
   tags:
-    - bankai
+    - docker-runner
 
 # -------- DEPLOY --------
 # Uses the same deploy script as local `make deploy`, so CI and local behave
@@ -96,4 +96,4 @@ deploy:
   only:
     - main
   tags:
-    - bankai
+    - docker-runner
