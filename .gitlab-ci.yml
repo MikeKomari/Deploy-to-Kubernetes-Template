@@ -46,9 +46,20 @@ build:
   stage: build
   script:
     # Fail fast with helpful messages instead of cryptic docker errors
-    - test -n "$NEXUS_URL"      || { echo "ERROR: NEXUS_URL is not set (GitLab CI/CD variable)"; exit 1; }
-    - test -n "$NEXUS_USERNAME" || { echo "ERROR: NEXUS_USERNAME is not set (GitLab CI/CD variable)"; exit 1; }
-    - test -n "$NEXUS_API_KEY"  || { echo "ERROR: NEXUS_API_KEY is not set (GitLab CI/CD variable)"; exit 1; }
+    - |
+      if [ ! -f "$NEXUS_URL" ]; then
+        echo "ERROR: NEXUS_URL is not set (GitLab CI/CD variable)"
+        exit 1
+      fi
+      if [ ! -f "$NEXUS_USERNAME" ]; then
+        echo "ERROR: NEXUS_USERNAME is not set (GitLab CI/CD variable)"
+        exit 1
+      fi
+      if [ ! -f "$NEXUS_API_KEY" ]; then
+        echo "ERROR: NEXUS_API_KEY is not set (GitLab CI/CD variable)"
+        exit 1
+      fi
+
     # Build context: use the repo root if it has a Dockerfile, else app/
     - if [ -f Dockerfile ]; then CONTEXT="."; else CONTEXT="./app"; fi
     - IMAGE="$NEXUS_URL/repository/${NEXUS_DOCKER_REPO:-docker-releases}/$APP_NAME"
