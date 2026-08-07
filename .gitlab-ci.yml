@@ -14,8 +14,10 @@
 # their own Dockerfile, k8s/*.yaml manifests and CI/CD variables are used.
 #
 # ------------------------- CI/CD project variables -------------------------
+# Only credentials & secrets belong here. Everything else (APP_PORT, REPLICAS,
+# INGRESS_HOST, ...) lives in the committed config file:  deploy.conf
+#
 # Required:
-#   APP_NAME             your app name (lowercase letters, numbers, dashes)
 #   NEXUS_URL            Nexus Docker registry host:port (no scheme)
 #   NEXUS_USERNAME       Nexus user
 #   NEXUS_API_KEY        Nexus password / API key (Masked)
@@ -23,17 +25,12 @@
 #                        cluster), or use the GitLab Kubernetes integration
 #
 # Optional:
-#   NEXUS_DOCKER_REPO    repo on Nexus; default "docker-releases"
 #   KUBE_CONTEXT         context name if the kubeconfig has several
-#   SECRETS              comma-separated secret NAMES, e.g. DB_PASSWORD,API_KEY.
-#                        The VALUES must be GitLab CI/CD variables with the
-#                        same names (Masked + Protected). They become a
-#                        Kubernetes Secret named <app>-secret, mounted into
-#                        the Deployment via secretRef (see k8s/deployment.yaml).
-#   IMAGE_PULL_SECRETS   comma-separated imagePullSecret names; auto-created
-#                        in the namespace from the Nexus credentials
-#   INGRESS_HOST, REPLICAS, APP_PORT, ... — everything else referenced as
-#                        ${VAR} inside your k8s/*.yaml manifests.
+#   + the VALUE of each secret listed in SECRETS= inside deploy.conf
+#     (same name, Masked + Protected)
+#
+# The pipeline reads deploy.conf for everything else, and real environment /
+# CI/CD variables always take precedence over the file.
 #
 # IMPORTANT: do NOT define any of these in a variables: block here — pipeline
 # variables silently override the ones you configure in project settings.
@@ -70,6 +67,21 @@ validate:
       python3 - <<'PY'
       import os, re, sys
       from pathlib import Path
+
+      # Load non-sensitive settings from deploy.conf; real env / CI/CD
+      # variables always take precedence over the file.
+      conf = Path("deploy.conf")
+      if conf.is_file():
+          for line in conf.read_text().splitlines():
+              line = line.strip()
+              if not line or line.startswith("#") or "=" not in line:
+                  continue
+              k, _, v = line.partition("=")
+              k = k.strip()
+              if k and k not in os.environ:
+                  # allow trailing "# comment" on the value, like in Makefiles
+                  v = v.strip().split(" #", 1)[0].split("\t#", 1)[0].strip()
+                  os.environ[k] = v.strip('"').strip("'")
 
       ok = True
       for var in ("APP_NAME", "NEXUS_URL", "NEXUS_USERNAME", "NEXUS_API_KEY"):
@@ -108,10 +120,16 @@ build:
   script:
     - |
       for V in NEXUS_URL NEXUS_USERNAME NEXUS_API_KEY; do
-          if [ -z "${!V}" ]; then
+        if [ -z "${!V}" ]; then
           echo "ERROR: $V is not set (Settings > CI/CD > Variables)."
           exit 1
-          fi
+        fi
+      done
+      # APP_NAME & NEXUS_DOCKER_REPO can come from deploy.conf (CI/CD vars win)
+      for V in APP_NAME NEXUS_DOCKER_REPO; do
+        if [ -z "${!V}" ] && [ -f deploy.conf ]; then
+          export "$V"="$(sed -n "/^$V=/{ s/^$V=//; s/[[:space:]]*#.*$//; s/[[:space:]]*$//; p; }" deploy.conf | tail -1)"
+        fi
       done
       if [ -f Dockerfile ]; then CONTEXT="."; else CONTEXT="./app"; fi
       IMAGE="$NEXUS_URL/repository/${NEXUS_DOCKER_REPO:-docker-releases}/$APP_NAME"
@@ -146,6 +164,21 @@ deploy:
       from pathlib import Path
 
       REPO = Path(".")
+
+      # Load non-sensitive settings from deploy.conf; real env / CI/CD
+      # variables always take precedence over the file.
+      conf = REPO / "deploy.conf"
+      if conf.is_file():
+          for line in conf.read_text().splitlines():
+              line = line.strip()
+              if not line or line.startswith("#") or "=" not in line:
+                  continue
+              k, _, v = line.partition("=")
+              k = k.strip()
+              if k and k not in os.environ:
+                  # allow trailing "# comment" on the value, like in Makefiles
+                  v = v.strip().split(" #", 1)[0].split("\t#", 1)[0].strip()
+                  os.environ[k] = v.strip('"').strip("'")
 
       def run(cmd, inp=None, check=True):
           r = subprocess.run(cmd, input=inp, capture_output=True, text=True)

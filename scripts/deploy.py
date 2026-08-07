@@ -13,8 +13,9 @@ Usage:
     python3 scripts/deploy.py --yes       # no prompts, use defaults/env vars
     python3 scripts/deploy.py --pod       # apply just the quick-test pod
 
-Values are taken from the environment, then from .env if it exists, then
-from sensible defaults. Run 'python3 scripts/configure.py' to generate .env.
+Values are taken from the environment, then from deploy.conf if it exists,
+then from sensible defaults. Run 'python3 scripts/configure.py' to generate
+deploy.conf.
 """
 
 import os
@@ -43,21 +44,26 @@ DEFAULTS = {
     "CPU_LIMIT": "500m",
 }
 
-ENV_FILE = REPO_ROOT / ".env"
+CONFIG_FILE = REPO_ROOT / "deploy.conf"
+LEGACY_ENV_FILE = REPO_ROOT / ".env"
 
 
 def load_dotenv() -> None:
-    """Load .env into os.environ, without overriding real environment vars."""
-    if not ENV_FILE.is_file():
+    """Load deploy.conf (fallback: legacy .env) into os.environ, without
+    overriding real environment variables."""
+    source = CONFIG_FILE if CONFIG_FILE.is_file() else LEGACY_ENV_FILE
+    if not source.is_file():
         return
-    for line in ENV_FILE.read_text().splitlines():
+    for line in source.read_text().splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
         key = key.strip()
         if key and key not in os.environ:
-            os.environ[key] = value.strip().strip('"').strip("'")
+            # allow trailing "# comment" on the value, like in Makefiles
+            value = value.strip().split(" #", 1)[0].split("\t#", 1)[0].strip()
+            os.environ[key] = value.strip('"').strip("'")
 
 def _is_positive_int(value: str) -> bool:
     """a positive integer"""
@@ -161,7 +167,7 @@ def secret_names() -> list[str]:
     """Secret variable NAMES from the SECRETS env var (comma-separated).
 
     Only names are listed; the values come from the environment (GitLab CI/CD
-    Masked variables, or .env for local runs) at deploy time.
+    Masked variables, or deploy.conf for local runs) at deploy time.
     """
     return [n.strip() for n in os.environ.get("SECRETS", "").split(",")
             if n.strip()]
@@ -182,7 +188,7 @@ def check_missing_vars(files: list[Path]) -> None:
     for var in sorted(missing):
         print(f"  - {var}", file=sys.stderr)
     print("If these are secrets, set them as GitLab CI/CD variables "
-          "(Masked + Protected), or in .env / your shell locally.",
+          "(Masked + Protected), or in deploy.conf / your shell locally.",
           file=sys.stderr)
     sys.exit(1)
 
@@ -303,7 +309,7 @@ def ensure_app_secrets(settings: dict) -> None:
         else:
             print(f"WARNING: secret '{name}' has no value in the environment. "
                   "Set it as a Masked+Protected GitLab CI/CD variable (or in "
-                  ".env for local runs).", file=sys.stderr)
+                  "deploy.conf for local runs).", file=sys.stderr)
 
     if not literal:
         print(f"ERROR: SECRETS declares {names} but none have a value set.",

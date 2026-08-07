@@ -36,14 +36,15 @@ git add -A && git commit -m "Deploy my app" && git push
 That's it. `make configure` asks you up to 9 plain-English questions
 (app name, port, domain, memory, ...) and:
 
-- writes your answers to `.env`
+- writes your answers to `deploy.conf` (committed — this is where all
+  non-sensitive settings live)
 - turns the right Kubernetes files on/off for your choices
   (e.g. no domain → no ingress)
 - validates everything before you commit
 
-**Before the first push, set `APP_NAME` as a GitLab CI/CD project variable**
-(see [CI/CD](#cicd-gitlab) below). That's the only required one — without a
-domain, the ingress is skipped automatically.
+**Commit `deploy.conf`.** It is the single configuration file the pipeline
+reads for everything non-sensitive (ports, replicas, domain, resources, ...).
+Sensitive things stay in GitLab CI/CD variables — see [CI/CD](#cicd-gitlab).
 
 ---
 
@@ -51,7 +52,7 @@ domain, the ingress is skipped automatically.
 
 | Command | What it does |
 |---|---|
-| `make configure` | **Ask questions → write `.env` → pick the right k8s files** |
+| `make configure` | **Ask questions → write `deploy.conf` → pick the right k8s files** |
 | `make preview` | Show the exact Kubernetes manifests that will be deployed |
 | `make validate` | Check your configuration (this also runs in CI) |
 | `make deploy` | Deploy to your cluster with your local kubectl |
@@ -60,7 +61,7 @@ domain, the ingress is skipped automatically.
 | `make undeploy` | Remove everything (deletes the namespace) |
 | `make pod` | Quick one-off test pod, no service/ingress |
 | `make compose` | Convert `docker-compose.yml` → k8s manifests |
-| `make envfile` | Regenerate `.env.example` |
+| `make configfile` | Regenerate `deploy.conf` from the current defaults |
 | `make help` | Show all commands |
 
 ---
@@ -94,22 +95,25 @@ defaults for everything else, and validates your answers:
 - Extra environment variables? *(goes into the ConfigMap — keep non-secrets here)*
 - Secrets? *(you only name them — values are never stored in the repo)*
 
-Re-run `make configure` any time to change things — it updates `.env` and
-re-picks the k8s files. You never edit YAML unless you want to.
+Re-run `make configure` any time to change things — it updates `deploy.conf`
+and re-picks the k8s files. You never edit YAML unless you want to.
 
 ### Secrets
 
-The wizard asks for your secret variable **names** (e.g. `DB_PASSWORD`,
-`API_KEY`) — never their values. It writes them as placeholders into
-`k8s/secret.yaml`, which is safe to commit: it contains only names.
+Non-sensitive settings live in `deploy.conf` (committed). **Secrets never
+do.** You only list the secret variable **names** in `deploy.conf`:
+
+```ini
+SECRETS=DB_PASSWORD,API_KEY
+```
 
 The actual values come from your **GitLab CI/CD variables** at deploy time
-(and from `.env` / your shell when deploying locally). Nothing secret is ever
-in the repo, and the app receives them via a Kubernetes Secret.
+(and from `deploy.conf` / your shell when deploying locally). Nothing secret
+is ever in the repo, and the app receives them via a Kubernetes Secret.
 
 ```bash
-# 1. During make configure, list the names:   DB_PASSWORD,API_KEY
-# 2. In GitLab → Settings → CI/CD → Variables, add each one:
+# 1. Put the names in deploy.conf:   SECRETS=DB_PASSWORD,API_KEY
+# 2. In GitLab → Settings → CI/CD → Variables, add each value:
 #      DB_PASSWORD = <value>   (Masked ✓  Protected ✓)
 #      API_KEY     = <value>   (Masked ✓  Protected ✓)
 # 3. Push — the deployment picks them up automatically.
@@ -139,24 +143,23 @@ in sync:
 
 ## CI/CD (GitLab)
 
-Set these in **Settings → CI/CD → Variables** of your project:
+Only **credentials and secrets** go in **Settings → CI/CD → Variables**.
+Everything non-sensitive (`APP_PORT`, `REPLICAS`, `INGRESS_HOST`, ...) lives
+in the committed `deploy.conf` — no need for dozens of project variables.
 
 | Variable | Required | Notes |
 |---|---|---|
-| `APP_NAME` | **Yes** | Your app name (lowercase letters, numbers, dashes) |
 | `NEXUS_URL` | **Yes** | Nexus Docker registry host:port, no scheme — e.g. `nexus.example.com:8082` |
 | `NEXUS_USERNAME` | **Yes** | Nexus user (script/user with access to the repo) |
 | `NEXUS_API_KEY` | **Yes** | Nexus API key / password — **Masked ✓** |
-| `NEXUS_DOCKER_REPO` | No | Repository on Nexus; default `docker-releases`. Can include a path prefix: `sde4-releases/backend` |
-| `INGRESS_HOST` | Only for a public domain | e.g. `api.example.com`; leave unset otherwise |
-| `NODE_PORT` | Only for `NodePort` | Fixed node port (30000-32767); empty = auto-assigned |
-| `IMAGE_PULL_SECRETS` | Only for private registries | Comma-separated k8s pull-secret names, e.g. `regcred` — created automatically from the Nexus credentials |
 | `KUBE_CONFIG_CONTENT` | For external clusters | Base64 of your kubeconfig (see below) |
 | `KUBE_CONTEXT` | Optional | Context name if your kubeconfig has several |
-| `DB_PASSWORD`, `API_KEY`, ... | If listed as secrets | Each secret name you chose in the wizard — **Masked ✓ Protected ✓** |
+| `DB_PASSWORD`, `API_KEY`, ... | If listed in `SECRETS=` of deploy.conf | Value of each secret name — **Masked ✓ Protected ✓** |
 
-Anything else (`REPLICAS`, `APP_PORT`, `MEMORY_LIMIT`, ...) can also be set
-as project variables; defaults come from the wizard.
+Everything else — `APP_NAME`, `NEXUS_DOCKER_REPO`, `INGRESS_HOST`,
+`REPLICAS`, `APP_PORT`, `IMAGE_PULL_SECRETS`, `SECRETS=` (names), ... — comes
+from `deploy.conf`. Environment / CI/CD variables always win over the file,
+so you can still override anything per-environment when needed.
 
 The deployed image is pinned to the commit tag:
 `$NEXUS_URL/repository/$NEXUS_DOCKER_REPO/$APP_NAME:$CI_COMMIT_SHORT_SHA`.
@@ -256,8 +259,9 @@ or deleting it.
 
 ### Edit values without the wizard
 
-`.env` (generated by the wizard, not committed) contains every setting.
-Change it and run `make deploy`, or just push — CI reads the same defaults.
+`deploy.conf` (generated by the wizard, committed) contains every
+non-sensitive setting. Change it and run `make deploy`, or just push — the
+pipeline reads the same file.
 
 ### Files in `k8s/`
 

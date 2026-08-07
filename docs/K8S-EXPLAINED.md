@@ -68,9 +68,9 @@ A secret behaves like a ConfigMap, but its values are stored base64-encoded
 and are only visible to pods that ask for it. In this template the wizard
 only writes the secret **names** into `k8s/secret.yaml`; the **values** are
 never committed. They are injected at deploy time from your GitLab CI/CD
-variables (set them as *Masked* + *Protected*), or from `.env` when you
-deploy from your laptop. The deployment only wires the secret in when
-`secret.yaml` exists — and refuses to deploy if a value is missing, rather
+variables (set them as *Masked* + *Protected*), or from `deploy.conf` when you
+deploy from your laptop. The deployment only wires the secret in when it has
+names listed — and refuses to deploy if a value is missing, rather
 than silently shipping an app with an empty password.
 
 Rule of thumb: log levels and URLs → ConfigMap. Passwords and keys → Secret.
