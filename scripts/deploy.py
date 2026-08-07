@@ -195,11 +195,15 @@ def render_manifests() -> list[tuple[str, str]]:
     return [(m.name, envsubst(m.read_text())) for m in files]
 
 
-def install_secret_manifest() -> None:
-    """If k8s/secret.yaml is active, wire it into the deployment's envFrom.
+def install_conditional_blocks() -> None:
+    """Inject conditional blocks into manifests at render time.
 
-    Injects ${SECRET_LINES} so the deployment references the secret only when
-    one is configured (a missing secret would otherwise block pod startup).
+    - ${SECRET_LINES}: secretRef in envFrom, only when k8s/secret.yaml exists
+      (a missing secret would otherwise block pod startup)
+    - ${PULL_SECRET_LINES}: imagePullSecrets, only when IMAGE_PULL_SECRETS is
+      set (needed to pull from a private registry like Nexus)
+    - ${NODE_PORT_LINES}: explicit nodePort, only when NODE_PORT is set
+      (otherwise Kubernetes picks one automatically)
     """
     app_name = os.environ.get("APP_NAME")
     if app_name and (REPO_ROOT / "k8s" / "secret.yaml").is_file():
@@ -207,6 +211,58 @@ def install_secret_manifest() -> None:
             f"            - secretRef:\n                name: {app_name}-secret")
     else:
         os.environ["SECRET_LINES"] = ""
+
+    pull = os.environ.get("IMAGE_PULL_SECRETS", "")
+    names = [n.strip() for n in pull.split(",") if n.strip()]
+    if names:
+        os.environ["PULL_SECRET_LINES"] = (
+            "      imagePullSecrets:\n" + "\n".join(
+                f"        - name: {n}" for n in names))
+    else:
+        os.environ["PULL_SECRET_LINES"] = ""
+
+    node_port = os.environ.get("NODE_PORT", "")
+    if node_port:
+        os.environ["NODE_PORT_LINES"] = f"      nodePort: {node_port}"
+    else:
+        os.environ["NODE_PORT_LINES"] = ""
+
+
+def ensure_pull_secrets(settings: dict) -> None:
+    """Create docker-registry imagePullSecrets in the namespace when
+    IMAGE_PULL_SECRETS is set (e.g. pulling from a private Nexus registry)."""
+    names = [n.strip() for n in os.environ.get("IMAGE_PULL_SECRETS", "").split(",")
+             if n.strip()]
+    if not names:
+        return
+    host = os.environ.get("NEXUS_URL")
+    user = os.environ.get("NEXUS_USERNAME")
+    api_key = os.environ.get("NEXUS_API_KEY")
+    if not (host and user and api_key):
+        print("WARNING: IMAGE_PULL_SECRETS is set but NEXUS_URL / NEXUS_USERNAME / "
+              "NEXUS_API_KEY are not — the pod may fail with ImagePullBackOff. "
+              "Set them to create the pull secret automatically.",
+              file=sys.stderr)
+        return
+    for name in names:
+        print(f"  Creating image pull secret {name}")
+        result = subprocess.run(
+            ["kubectl", "create", "secret", "docker-registry", name,
+             f"--namespace={settings['NAMESPACE']}",
+             f"--docker-server={host}",
+             f"--docker-username={user}",
+             f"--docker-password={api_key}",
+             "--dry-run=client", "-o", "yaml"],
+            capture_output=True, text=True)
+        if result.returncode != 0:
+            sys.stderr.write(result.stderr)
+            sys.exit(result.returncode)
+        applied = subprocess.run(["kubectl", "apply", "-f", "-"],
+                                 input=result.stdout, capture_output=True, text=True)
+        sys.stdout.write(applied.stdout)
+        if applied.returncode != 0:
+            sys.stderr.write(applied.stderr)
+            sys.exit(applied.returncode)
 
 
 def apply_manifests(settings: dict, manifests: list[tuple[str, str]]) -> None:
@@ -291,7 +347,7 @@ def main() -> int:
         print(f"==> Done! Run: make logs")
         return 0
 
-    install_secret_manifest()
+    install_conditional_blocks()
     manifests = render_manifests()
 
     print("==> Deployment summary")
@@ -317,6 +373,7 @@ def main() -> int:
         return 1
 
     print(f"==> Deploying to namespace {settings['NAMESPACE']} ({settings['ENVIRONMENT']})")
+    ensure_pull_secrets(settings)
     apply_manifests(settings, manifests)
     print(f"==> Done! Run: kubectl get all -n {settings['NAMESPACE']}")
     return 0

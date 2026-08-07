@@ -35,6 +35,7 @@ DEFAULTS = {
     "APP_PORT": "3000",
     "SERVICE_PORT": "80",
     "SERVICE_TYPE": "ClusterIP",
+    "NODE_PORT": "",
     "INGRESS_HOST": "",
     "INGRESS_CLASS": "nginx",
     "INGRESS_PATH": "/",
@@ -48,7 +49,7 @@ DEFAULTS = {
 # Everything written to .env, in this order (EXTRA_ENV, SECRETS last).
 KEYS = [
     "APP_NAME", "NAMESPACE", "ENVIRONMENT", "IMAGE", "REPLICAS",
-    "APP_PORT", "SERVICE_PORT", "SERVICE_TYPE",
+    "APP_PORT", "SERVICE_PORT", "SERVICE_TYPE", "NODE_PORT",
     "INGRESS_HOST", "INGRESS_CLASS", "INGRESS_PATH",
     "HEALTHCHECK_PATH",
     "MEMORY_REQUEST", "CPU_REQUEST", "MEMORY_LIMIT", "CPU_LIMIT",
@@ -60,6 +61,7 @@ def _valid_app_name(v): return bool(NAME_RE.match(v))
 def _valid_port(v): return v.isdigit() and 1 <= int(v) <= 65535
 def _valid_replicas(v): return v.isdigit() and int(v) > 0
 def _valid_service_type(v): return v in {"ClusterIP", "NodePort", "LoadBalancer"}
+def _valid_node_port(v): return v.isdigit() and 30000 <= int(v) <= 32767
 def _valid_resource(v): return bool(RESOURCE_RE.match(v))
 def _valid_host(v): return bool(HOST_RE.match(v))
 
@@ -135,7 +137,9 @@ def ask_yes_no(label: str, default: bool = True) -> bool:
     suffix = "Y/n" if default else "y/N"
     while True:
         raw = input(f"  ? {label} [{suffix}]: ").strip().lower()
-        if raw in ("", "y", "yes"):
+        if raw == "":
+            return default
+        if raw in ("y", "yes"):
             return True
         if raw in ("n", "no"):
             return False
@@ -313,6 +317,7 @@ def write_env(settings: dict):
         f"APP_PORT={r('APP_PORT')}",
         f"SERVICE_PORT={r('SERVICE_PORT')}",
         f"SERVICE_TYPE={r('SERVICE_TYPE')}",
+        f"NODE_PORT={r('NODE_PORT')}",
         f"INGRESS_HOST={r('INGRESS_HOST')}",
         f"INGRESS_CLASS={r('INGRESS_CLASS')}",
         f"INGRESS_PATH={r('INGRESS_PATH')}",
@@ -362,6 +367,14 @@ def run_wizard() -> dict:
         "How should the app be reachable? (ClusterIP = internal only)",
         value_for("SERVICE_TYPE"), _valid_service_type,
         hint="ClusterIP, NodePort or LoadBalancer")
+
+    if settings["SERVICE_TYPE"] == "NodePort":
+        settings["NODE_PORT"] = ask(
+            "Fixed port on each machine (30000-32767, empty = auto-assigned)?",
+            value_for("NODE_PORT"), lambda v: v == "" or _valid_node_port(v),
+            hint="leave empty to let Kubernetes pick one")
+    else:
+        settings["NODE_PORT"] = value_for("NODE_PORT")
 
     settings["MEMORY_LIMIT"] = ask(
         "Max memory per copy (e.g. 256Mi, 1Gi)?", value_for("MEMORY_LIMIT"), _valid_resource)
@@ -441,6 +454,11 @@ def validate(settings: dict, check_only: bool, explicit: set | None = None,
     service_type = settings.get("SERVICE_TYPE", "")
     if service_type and not _valid_service_type(service_type):
         errors.append(f"SERVICE_TYPE '{service_type}' must be ClusterIP, NodePort or LoadBalancer.")
+
+    node_port = settings.get("NODE_PORT", "")
+    if node_port and not _valid_node_port(node_port):
+        errors.append(f"NODE_PORT '{node_port}' must be between 30000 and 32767 "
+                      "(or leave it empty to auto-assign).")
 
     ingress = settings.get("INGRESS_HOST", "")
     if ingress and not _valid_host(ingress):

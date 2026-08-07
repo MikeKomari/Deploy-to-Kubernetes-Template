@@ -125,7 +125,8 @@ The pipeline (`.gitlab-ci.yml`):
 
 1. **validate** — checks your configuration (including that every secret
    name has a value), fails fast with clear messages
-2. **build** — builds `app/Dockerfile`, pushes `registry/app:latest` + commit SHA
+2. **build** — builds `app/Dockerfile` and publishes the image to your
+   **Nexus** Docker registry (commit SHA + `latest` tags)
 3. **deploy** — renders the k8s manifests with your settings and applies them
    with `kubectl` (namespace, deployment, service, ingress, configmap,
    secret — only the files you need). It refuses to deploy if any variable
@@ -140,13 +141,36 @@ Set these in **Settings → CI/CD → Variables** of your project:
 | Variable | Required | Notes |
 |---|---|---|
 | `APP_NAME` | **Yes** | Your app name (lowercase letters, numbers, dashes) |
+| `NEXUS_URL` | **Yes** | Nexus Docker registry host:port, no scheme — e.g. `nexus.example.com:8082` |
+| `NEXUS_USERNAME` | **Yes** | Nexus user (script/user with access to the repo) |
+| `NEXUS_API_KEY` | **Yes** | Nexus API key / password — **Masked ✓** |
+| `NEXUS_DOCKER_REPO` | No | Repository on Nexus; default `docker-releases`. Can include a path prefix: `sde4-releases/backend` |
 | `INGRESS_HOST` | Only for a public domain | e.g. `api.example.com`; leave unset otherwise |
+| `NODE_PORT` | Only for `NodePort` | Fixed node port (30000-32767); empty = auto-assigned |
+| `IMAGE_PULL_SECRETS` | Only for private registries | Comma-separated k8s pull-secret names, e.g. `regcred` — created automatically from the Nexus credentials |
 | `KUBE_CONFIG_CONTENT` | For external clusters | Base64 of your kubeconfig (see below) |
 | `KUBE_CONTEXT` | Optional | Context name if your kubeconfig has several |
 | `DB_PASSWORD`, `API_KEY`, ... | If listed as secrets | Each secret name you chose in the wizard — **Masked ✓ Protected ✓** |
 
 Anything else (`REPLICAS`, `APP_PORT`, `MEMORY_LIMIT`, ...) can also be set
 as project variables; defaults come from the wizard.
+
+The deployed image is pinned to the commit tag:
+`$NEXUS_URL/repository/$NEXUS_DOCKER_REPO/$APP_NAME:$CI_COMMIT_SHORT_SHA`.
+
+**Private registry pull access.** The cluster must be able to pull from
+Nexus. When `IMAGE_PULL_SECRETS` is set, the deploy stage creates the
+docker-registry secret(s) in your namespace automatically (from
+`NEXUS_URL`/`NEXUS_USERNAME`/`NEXUS_API_KEY`) and attaches them to the
+deployment. To create one manually instead:
+
+```bash
+kubectl create secret docker-registry regcred \
+  --docker-server="$NEXUS_URL" \
+  --docker-username="$NEXUS_USERNAME" \
+  --docker-password="$NEXUS_API_KEY" \
+  --namespace="$NAMESPACE"
+```
 
 **`KUBE_CONFIG_CONTENT`** is only needed when GitLab cannot reach your
 cluster directly (e.g. no GitLab Kubernetes Agent integration). It is the
@@ -162,11 +186,13 @@ cat ~/.kube/config | base64 | tr -d '\n'
 Paste the output into the `KUBE_CONFIG_CONTENT` variable (Masked). If your
 kubeconfig has several contexts, also set `KUBE_CONTEXT` to the right one.
 
-The image tag is automatically `$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA`.
-
-> Note: never define `APP_NAME`/`INGRESS_HOST` in a `variables:` block inside
-> `.gitlab-ci.yml` — pipeline variables override project settings. Keep that
-> block empty (it already is).
+> Note: never define `APP_NAME`/`NEXUS_URL`/etc. in a `variables:` block
+> inside `.gitlab-ci.yml` — pipeline variables override project settings.
+> Keep that block minimal (it already is).
+>
+> If your Nexus registry is plain HTTP (no TLS), the Docker-in-Docker
+> service must trust it: uncomment the `--insecure-registry` block at the
+> top of `.gitlab-ci.yml` and put your registry host:port there.
 
 ---
 

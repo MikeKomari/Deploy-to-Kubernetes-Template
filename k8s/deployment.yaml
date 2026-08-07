@@ -17,6 +17,7 @@ spec:
         app: ${APP_NAME}
         env: ${ENVIRONMENT}
     spec:
+${PULL_SECRET_LINES}
       containers:
         - name: ${APP_NAME}
           image: ${IMAGE}
@@ -32,6 +33,7 @@ spec:
           envFrom:
             - configMapRef:
                 name: ${APP_NAME}-config
+${SECRET_LINES}
           resources:
             requests:
               memory: "${MEMORY_REQUEST}"

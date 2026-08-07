@@ -14,4 +14,4 @@ spec:
     - protocol: TCP
       port: ${SERVICE_PORT}
       targetPort: ${APP_PORT}
-      NodePort: ${NODE_PORT}
+${NODE_PORT_LINES}
