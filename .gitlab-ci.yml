@@ -119,18 +119,25 @@ build:
   stage: build
   script:
     - |
-      for V in NEXUS_URL NEXUS_USERNAME NEXUS_API_KEY; do
-        if [ -z "${!V}" ]; then
-          echo "ERROR: $V is not set (Settings > CI/CD > Variables)."
-          exit 1
-        fi
-      done
+      if [ -z "$NEXUS_URL" ]; then
+        echo "ERROR: NEXUS_URL is not set (Settings > CI/CD > Variables)."
+        exit 1
+      fi
+      if [ -z "$NEXUS_USERNAME" ]; then
+        echo "ERROR: NEXUS_USERNAME is not set (Settings > CI/CD > Variables)."
+        exit 1
+      fi
+      if [ -z "$NEXUS_API_KEY" ]; then
+        echo "ERROR: NEXUS_API_KEY is not set (Settings > CI/CD > Variables)."
+        exit 1
+      fi
       # APP_NAME & NEXUS_DOCKER_REPO can come from deploy.conf (CI/CD vars win)
-      for V in APP_NAME NEXUS_DOCKER_REPO; do
-        if [ -z "${!V}" ] && [ -f deploy.conf ]; then
-          export "$V"="$(sed -n "/^$V=/{ s/^$V=//; s/[[:space:]]*#.*$//; s/[[:space:]]*$//; p; }" deploy.conf | tail -1)"
-        fi
-      done
+      if [ -z "$APP_NAME" ] && [ -f deploy.conf ]; then
+        export APP_NAME="$(sed -n '/^APP_NAME=/{s/^APP_NAME=//;s/[[:space:]]*#.*$//;s/[[:space:]]*$//;p;}' deploy.conf | tail -1)"
+      fi
+      if [ -z "$NEXUS_DOCKER_REPO" ] && [ -f deploy.conf ]; then
+        export NEXUS_DOCKER_REPO="$(sed -n '/^NEXUS_DOCKER_REPO=/{s/^NEXUS_DOCKER_REPO=//;s/[[:space:]]*#.*$//;s/[[:space:]]*$//;p;}' deploy.conf | tail -1)"
+      fi
       if [ -f Dockerfile ]; then CONTEXT="."; else CONTEXT="./app"; fi
       IMAGE="$NEXUS_URL/repository/${NEXUS_DOCKER_REPO:-docker-releases}/$APP_NAME"
       docker build -t "$IMAGE:$CI_COMMIT_SHORT_SHA" "$CONTEXT"
