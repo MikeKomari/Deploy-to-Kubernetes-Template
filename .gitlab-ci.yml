@@ -40,6 +40,8 @@ validate:
     - python3 scripts/configure.py --check
   only:
     - main
+  tags:
+    - bankai
 
 # -------- BUILD + PUBLISH TO NEXUS --------
 build:
@@ -70,6 +72,8 @@ build:
     - docker push "$IMAGE:latest"
   only:
     - main
+  tags:
+    - bankai
 
 # -------- DEPLOY --------
 # Uses the same deploy script as local `make deploy`, so CI and local behave
@@ -91,3 +95,5 @@ deploy:
     - python3 scripts/deploy.py --yes
   only:
     - main
+  tags:
+    - bankai
