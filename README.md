@@ -121,16 +121,19 @@ in the repo, and the app receives them via a Kubernetes Secret.
 
 ### 3. Push → GitLab does the rest
 
-The pipeline (`.gitlab-ci.yml`):
+The pipeline (`.gitlab-ci.yml`) is fully self-contained — no scripts to keep
+in sync:
 
-1. **validate** — checks your configuration (including that every secret
-   name has a value), fails fast with clear messages
-2. **build** — builds `app/Dockerfile` and publishes the image to your
-   **Nexus** Docker registry (commit SHA + `latest` tags)
-3. **deploy** — renders the k8s manifests with your settings and applies them
-   with `kubectl` (namespace, deployment, service, ingress, configmap,
-   secret — only the files you need). It refuses to deploy if any variable
-   is missing, instead of shipping a broken app.
+1. **validate** — checks required CI/CD variables, the Dockerfile and that
+   every `${VAR}` used in your k8s manifests is set; fails fast with clear
+   messages
+2. **build** — builds the image and publishes it to your **Nexus** Docker
+   registry (commit SHA + `latest` tags); works with plain-HTTP registries
+   out of the box
+3. **deploy** — creates the k8s Secret from your masked `SECRETS` variables,
+   renders the k8s manifests with your settings and applies them with
+   `kubectl`. It refuses to deploy if any variable is missing, instead of
+   shipping a broken app.
 
 ---
 
@@ -190,9 +193,26 @@ kubeconfig has several contexts, also set `KUBE_CONTEXT` to the right one.
 > inside `.gitlab-ci.yml` — pipeline variables override project settings.
 > Keep that block minimal (it already is).
 >
-> If your Nexus registry is plain HTTP (no TLS), the Docker-in-Docker
-> service must trust it: uncomment the `--insecure-registry` block at the
-> top of `.gitlab-ci.yml` and put your registry host:port there.
+> If your Nexus registry is plain HTTP (no TLS), the pipeline already starts
+> the build daemon with `--insecure-registry $NEXUS_URL`, so nothing to do.
+> Only delete those lines (at the top of `.gitlab-ci.yml`) if your Nexus has
+> a valid TLS certificate.
+
+### Reuse this pipeline from other projects
+
+Instead of copying this file everywhere, other projects can **include** it —
+they always get the latest validate/build/deploy logic, and their own
+Dockerfile, `k8s/` manifests and CI/CD variables are used automatically:
+
+```yaml
+include:
+  - project: '<group>/kube-template'
+    ref: 'main'          # or pin a version: ref: 'v1.2.0'
+    file: '/.gitlab-ci.yml'
+```
+
+No scripts are needed in the consuming project — everything lives in this
+pipeline file. Update the template once, all consuming projects pick it up.
 
 ---
 

@@ -1,99 +1,237 @@
+# ============================================================================
+# All-in-one pipeline: VALIDATE -> BUILD (push to Nexus) -> DEPLOY to Kubernetes.
+#
+# Everything lives in this one file — no separate scripts to keep in sync.
+# Other projects reuse the same pipeline (and always get the latest version)
+# by INCLUDING this file:
+#
+#   include:
+#     - project: '<group>/kube-template'
+#       ref: 'main'                    # or a pinned tag like 'v1.2.0'
+#       file: '/.gitlab-ci.yml'
+#
+# The job logic runs inside the clone of whatever project includes it, so
+# their own Dockerfile, k8s/*.yaml manifests and CI/CD variables are used.
+#
+# ------------------------- CI/CD project variables -------------------------
+# Required:
+#   APP_NAME             your app name (lowercase letters, numbers, dashes)
+#   NEXUS_URL            Nexus Docker registry host:port (no scheme)
+#   NEXUS_USERNAME       Nexus user
+#   NEXUS_API_KEY        Nexus password / API key (Masked)
+#   KUBE_CONFIG_CONTENT  base64 of your kubeconfig (so kubectl can reach the
+#                        cluster), or use the GitLab Kubernetes integration
+#
+# Optional:
+#   NEXUS_DOCKER_REPO    repo on Nexus; default "docker-releases"
+#   KUBE_CONTEXT         context name if the kubeconfig has several
+#   SECRETS              comma-separated secret NAMES, e.g. DB_PASSWORD,API_KEY.
+#                        The VALUES must be GitLab CI/CD variables with the
+#                        same names (Masked + Protected). They become a
+#                        Kubernetes Secret named <app>-secret, mounted into
+#                        the Deployment via secretRef (see k8s/deployment.yaml).
+#   IMAGE_PULL_SECRETS   comma-separated imagePullSecret names; auto-created
+#                        in the namespace from the Nexus credentials
+#   INGRESS_HOST, REPLICAS, APP_PORT, ... — everything else referenced as
+#                        ${VAR} inside your k8s/*.yaml manifests.
+#
+# IMPORTANT: do NOT define any of these in a variables: block here — pipeline
+# variables silently override the ones you configure in project settings.
+# ============================================================================
+
 image: docker:24
+
 services:
   - docker:24-dind
-  # If your Nexus registry is plain HTTP (no TLS), uncomment and put the
-  # registry host:port below so the Docker daemon trusts it:
+  # If your Nexus registry is served over plain HTTP, Docker blocks it by
+  # default ("http: server gave HTTP response to HTTPS client"). These two
+  # lines make the build daemon trust NEXUS_URL. Delete them if your Nexus
+  # has a valid TLS certificate.
   - name: docker:24-dind
-    command: ["--insecure-registry", "10.32.11.213:9070"]
+    command: ["--insecure-registry", "$NEXUS_URL"]
 
 variables:
-  DOCKER_DRIVER: overlay2
   DOCKER_TLS_CERTDIR: ""
-
-# ============ GitLab CI/CD project variables ============
-#   APP_NAME          (required)        your app name
-#   NEXUS_URL         (required)        Nexus docker registry host:port, no
-#                                       scheme, e.g. nexus.example.com:8082
-#   NEXUS_USERNAME    (required)        Nexus user
-#   NEXUS_API_KEY     (required)        Nexus API key / password
-#   NEXUS_DOCKER_REPO (optional)        repository on Nexus, default
-#                                       docker-releases (can include a path
-#                                       prefix, e.g. sde4-releases/backend)
-#   INGRESS_HOST, KUBE_CONFIG_CONTENT, KUBE_CONTEXT, secrets, ...
-#   IMAGE_PULL_SECRETS (optional)       comma-separated k8s imagePullSecret
-#                                       names, e.g. regcred
-#
-# IMPORTANT: keep the variables: block above minimal — anything defined here
-# would OVERRIDE the same-named variables in your project settings.
 
 stages:
   - validate
   - build
   - deploy
 
-# -------- VALIDATE --------
-# Fast feedback: checks your configuration before spending time building.
+# ----------------------------------------------------------------------------
+# VALIDATE — fast feedback before spending time building
+# ----------------------------------------------------------------------------
 validate:
-  stage: validate
-  image: python:3.12-slim
-  script:
-    - python3 scripts/configure.py --check
-  only:
-    - main
-  tags:
+    stage: validate
+    image: python:3.12-slim
+    script:
+        - |
+            export SECRET_LINES= PULL_SECRET_LINES= NODE_PORT_LINES=
+            python3 - <<'PY'
+            import os, re, sys
+            from pathlib import Path
+
+            ok = True
+            for var in ("APP_NAME", "NEXUS_URL", "NEXUS_USERNAME", "NEXUS_API_KEY"):
+                if not os.environ.get(var):
+                    print(f"ERROR: {var} is not set - add it in Settings > CI/CD > Variables.")
+                    ok = False
+            if not re.fullmatch(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?", os.environ.get("APP_NAME", "")):
+                print("ERROR: APP_NAME must be lowercase letters, numbers and dashes.")
+                ok = False
+            if not Path("Dockerfile").is_file() and not Path("app/Dockerfile").is_file():
+                print("ERROR: no Dockerfile found (put it at the repo root or in app/).")
+                ok = False
+
+            # Every ${VAR} in k8s/*.yaml must resolve, so we fail fast instead of
+            # shipping a broken deployment. Some vars are injected by the deploy job:
+            injected = {"SECRET_LINES", "PULL_SECRET_LINES", "NODE_PORT_LINES"}
+            for f in sorted(Path("k8s").glob("*.yaml")):
+                if f.name in ("namespace.yaml", "kustomization.yaml"):
+                    continue
+                for m in re.finditer(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(:-[^}]*)?\}", f.read_text()):
+                    if m.group(2) is None and m.group(1) not in os.environ and m.group(1) not in injected:
+                        print(f"ERROR: {m.group(1)} is not set (needed by k8s/{f.name}).")
+                        ok = False
+            sys.exit(0 if ok else 1)
+            PY
+    only:
+        - main
+    tags:
     - docker-runner
 
-# -------- BUILD + PUBLISH TO NEXUS --------
+# ----------------------------------------------------------------------------
+# BUILD — build the Docker image and publish it to Nexus
+# ----------------------------------------------------------------------------
 build:
-  stage: build
-  script:
-    # Fail fast with helpful messages instead of cryptic docker errors
-    - |
-      if [ -z "$NEXUS_URL" ]; then
-        echo "ERROR: NEXUS_URL is not set (GitLab CI/CD variable)"
-        exit 1
-      fi
-      if [ -z "$NEXUS_USERNAME" ]; then
-        echo "ERROR: NEXUS_USERNAME is not set (GitLab CI/CD variable)"
-        exit 1
-      fi
-      if [ -z "$NEXUS_API_KEY" ]; then
-        echo "ERROR: NEXUS_API_KEY is not set (GitLab CI/CD variable)"
-        exit 1
-      fi
+    stage: build
+    script:
+        - |
+            for V in NEXUS_URL NEXUS_USERNAME NEXUS_API_KEY; do
+                if [ -z "${!V}" ]; then
+                echo "ERROR: $V is not set (Settings > CI/CD > Variables)."
+                exit 1
+                fi
+            done
+            if [ -f Dockerfile ]; then CONTEXT="."; else CONTEXT="./app"; fi
+            IMAGE="$NEXUS_URL/repository/${NEXUS_DOCKER_REPO:-docker-releases}/$APP_NAME"
+            docker build -t "$IMAGE:$CI_COMMIT_SHORT_SHA" "$CONTEXT"
+            echo "$NEXUS_API_KEY" | docker login --username "$NEXUS_USERNAME" --password-stdin "$NEXUS_URL"
+            docker push "$IMAGE:$CI_COMMIT_SHORT_SHA"
+            docker tag "$IMAGE:$CI_COMMIT_SHORT_SHA" "$IMAGE:latest"
+            docker push "$IMAGE:latest"
+    only:
+        - main
+    tags:
+        - docker-runner
 
-    # Build context: use the repo root if it has a Dockerfile, else app/
-    - if [ -f Dockerfile ]; then CONTEXT="."; else CONTEXT="./app"; fi
-    - IMAGE="$NEXUS_URL/repository/${NEXUS_DOCKER_REPO:-docker-releases}/$APP_NAME"
-    - docker build -t "$IMAGE:$CI_COMMIT_SHORT_SHA" "$CONTEXT"
-    - echo "$NEXUS_API_KEY" | docker login --username "$NEXUS_USERNAME" --password-stdin "$NEXUS_URL"
-    - docker push "$IMAGE:$CI_COMMIT_SHORT_SHA"
-    - docker tag "$IMAGE:$CI_COMMIT_SHORT_SHA" "$IMAGE:latest"
-    - docker push "$IMAGE:latest"
-  only:
-    - main
-  tags:
-    - docker-runner
-
-# -------- DEPLOY --------
-# Uses the same deploy script as local `make deploy`, so CI and local behave
-# identically. The image tag is pinned to the commit that was just built.
+# ----------------------------------------------------------------------------
+# DEPLOY — render the k8s manifests, create the Secrets, apply everything
+# ----------------------------------------------------------------------------
 deploy:
-  stage: deploy
-  image: python:3.12-slim
-  before_script:
-    - apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates
-    # Install kubectl (only tool deploy.py needs)
-    - curl -fsSLO "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-    - chmod +x kubectl && mv kubectl /usr/local/bin/kubectl
-    # Point kubectl at your cluster: either GitLab Kubernetes integration
-    # (sets KUBE_CONFIG_CONTENT) or a base64 kubeconfig variable
-    - if [ -n "$KUBE_CONFIG_CONTENT" ]; then mkdir -p "$HOME/.kube" && echo "$KUBE_CONFIG_CONTENT" | base64 -d > "$HOME/.kube/config"; fi
-    - if [ -n "$KUBE_CONTEXT" ]; then kubectl config use-context "$KUBE_CONTEXT"; fi
-  script:
-    - export IMAGE="$NEXUS_URL/repository/${NEXUS_DOCKER_REPO:-docker-releases}/$APP_NAME:$CI_COMMIT_SHORT_SHA"
-    - python3 scripts/deploy.py --yes
-  only:
-    - main
-  tags:
-    - docker-runner
+    stage: deploy
+    image: python:3.12-slim
+    before_script:
+        - apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates
+        - |
+        curl -fsSLO "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+        chmod +x kubectl && mv kubectl /usr/local/bin/kubectl
+        if [ -n "$KUBE_CONFIG_CONTENT" ]; then mkdir -p "$HOME/.kube" && echo "$KUBE_CONFIG_CONTENT" | base64 -d > "$HOME/.kube/config"; fi
+        if [ -n "$KUBE_CONTEXT" ]; then kubectl config use-context "$KUBE_CONTEXT"; fi
+    script:
+        - export IMAGE="$NEXUS_URL/repository/${NEXUS_DOCKER_REPO:-docker-releases}/$APP_NAME:$CI_COMMIT_SHORT_SHA"
+        - |
+            python3 - <<'PY'
+            import os, re, subprocess, sys
+            from pathlib import Path
+
+            REPO = Path(".")
+
+            def run(cmd, inp=None, check=True):
+                r = subprocess.run(cmd, input=inp, capture_output=True, text=True)
+                if r.stdout: sys.stdout.write(r.stdout)
+                if r.stderr: sys.stderr.write(r.stderr)
+                if check and r.returncode != 0:
+                    sys.exit(r.returncode)
+                return r
+
+            app_name  = os.environ["APP_NAME"]
+            namespace = os.environ.get("NAMESPACE", app_name)
+            envsubst_re = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(:-([^}]*))?\}|\$([A-Za-z_][A-Za-z0-9_]*)")
+            def envsubst(text):
+                def repl(m):
+                    name, default = m.group(1), m.group(3)
+                    if default is None:
+                        return os.environ.get(name, "")
+                    return os.environ.get(name, default)
+                return envsubst_re.sub(repl, text)
+
+            # ---- 1. inject the conditional blocks the manifests may reference ----
+            #      (empty means the block is simply removed from the rendered YAML)
+            secret_names = [n.strip() for n in os.environ.get("SECRETS", "").split(",") if n.strip()]
+            pull_names   = [n.strip() for n in os.environ.get("IMAGE_PULL_SECRETS", "").split(",") if n.strip()]
+            os.environ["SECRET_LINES"] = (
+                f"            - secretRef:\n                name: {app_name}-secret"
+                if secret_names else "")
+            os.environ["PULL_SECRET_LINES"] = (
+                "      imagePullSecrets:\n" + "\n".join(
+                    f"        - name: {n}" for n in pull_names)
+                if pull_names else "")
+            os.environ["NODE_PORT_LINES"] = os.environ.get("NODE_PORT", "")
+
+            # ---- 2. sensitive values: SECRETS names -> k8s Secret from CI/CD vars ----
+            #      Values come from Masked+Protected GitLab variables; nothing is
+            #      ever written to the repo or printed to the pipeline log.
+            if secret_names:
+                for n in secret_names:
+                    if not os.environ.get(n):
+                        sys.stderr.write(f"ERROR: secret '{n}' has no value set. "
+                                        "Add it as a Masked+Protected CI/CD variable.\n")
+                        sys.exit(1)
+                cmd = ["kubectl", "create", "secret", "generic", f"{app_name}-secret",
+                        "--namespace", namespace, "--dry-run=client", "-o", "yaml"]
+                for n in secret_names:
+                    cmd += ["--from-literal", f"{n}={os.environ[n]}"]
+                run(["kubectl", "apply", "-f", "-"], inp=run(cmd).stdout)
+
+            # ---- 3. imagePullSecrets: create docker-registry secrets on demand ----
+            if pull_names and os.environ.get("NEXUS_URL") and os.environ.get("NEXUS_USERNAME") \
+                    and os.environ.get("NEXUS_API_KEY"):
+                for n in pull_names:
+                    cmd = ["kubectl", "create", "secret", "docker-registry", n,
+                            "--namespace", namespace,
+                            f"--docker-server={os.environ['NEXUS_URL']}",
+                            f"--docker-username={os.environ['NEXUS_USERNAME']}",
+                            f"--docker-password={os.environ['NEXUS_API_KEY']}",
+                            "--dry-run=client", "-o", "yaml"]
+                    run(["kubectl", "apply", "-f", "-"], inp=run(cmd).stdout)
+
+            # ---- 4. render every active manifest, refuse incomplete ones ----
+            manifest_dir = REPO / "k8s"
+            files = [m for m in sorted(manifest_dir.glob("*.yaml"))
+                    if m.name not in ("namespace.yaml", "kustomization.yaml")]
+            if (manifest_dir / "ingress.yaml").is_file() and not os.environ.get("INGRESS_HOST"):
+                files = [m for m in files if m.name != "ingress.yaml"]
+                print("NOTE: skipping ingress.yaml - INGRESS_HOST is not set.")
+
+            missing = sorted({m.group(1) for f in files
+                                for m in re.finditer(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(:-[^}]*)?\}", f.read_text())
+                                if m.group(2) is None and m.group(1) not in os.environ})
+            if missing:
+                print("ERROR: refusing to deploy - these variables are not set: "
+                        + ", ".join(missing), file=sys.stderr)
+                sys.exit(1)
+            manifests = [(m.name, envsubst(m.read_text())) for m in files]
+
+            # ---- 5. apply: namespace first, then everything else ----
+            if run(["kubectl", "get", "namespace", namespace], check=False).returncode != 0:
+                run(["kubectl", "create", "namespace", namespace])
+            for name, rendered in manifests:
+                print(f"  Applying {name}")
+                run(["kubectl", "apply", "-f", "-"], inp=rendered)
+            print(f"==> Done. Check with: kubectl get all -n {namespace}")
+            PY
+    only:
+        - main
+    tags:
+        - docker-runner
