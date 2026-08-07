@@ -3,8 +3,8 @@ services:
   - docker:24-dind
   # If your Nexus registry is plain HTTP (no TLS), uncomment and put the
   # registry host:port below so the Docker daemon trusts it:
-  # - name: docker:24-dind
-  #   command: ["--insecure-registry", "nexus.example.com:8082"]
+  - name: docker:24-dind
+    command: ["--insecure-registry", "10.32.11.213:9070"]
 
 variables:
   DOCKER_DRIVER: overlay2
