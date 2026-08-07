@@ -110,7 +110,7 @@ validate:
   only:
     - main
   tags:
-    - docker-runner
+    - bankai
 
 # ----------------------------------------------------------------------------
 # BUILD — build the Docker image and publish it to Nexus
@@ -148,7 +148,7 @@ build:
   only:
     - main
   tags:
-    - docker-runner
+    - bankai
 
 # ----------------------------------------------------------------------------
 # DEPLOY — render the k8s manifests, create the Secrets, apply everything
@@ -274,4 +274,4 @@ deploy:
   only:
     - main
   tags:
-    - docker-runner
+    - bankai
